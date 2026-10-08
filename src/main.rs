@@ -53,8 +53,9 @@ struct Args {
     #[arg(short, long, default_value_t = 10.0)]
     margin: f64,
 
-    /// Space between images in mm
-    #[arg(short, long, default_value_t = 2.0)]
+    /// Space between images in mm. Negative values make neighbouring images
+    /// overlap by that much
+    #[arg(short, long, default_value_t = 2.0, allow_negative_numbers = true)]
     gap: f64,
 
     /// Resolution used to turn pixels into physical size (ignored if --width/--height is set)
@@ -85,10 +86,11 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    for (name, v) in [("margin", args.margin), ("gap", args.gap)] {
-        if !(v >= 0.0) {
-            bail!("--{name} must be zero or positive");
-        }
+    if !(args.margin >= 0.0) {
+        bail!("--margin must be zero or positive");
+    }
+    if !args.gap.is_finite() {
+        bail!("--gap must be a number");
     }
     for (name, v) in [("dpi", Some(args.dpi)), ("width", args.width), ("height", args.height)] {
         if v.is_some_and(|v| !(v > 0.0)) {
@@ -131,6 +133,13 @@ fn main() -> Result<()> {
             fit(info, w, h, area_w, area_h, !args.no_rotate)
         })
         .collect();
+    if let Some((info, _)) = infos.iter().zip(&sizes).find(|(_, (w, h))| w.min(*h) + gap <= 0.0) {
+        bail!(
+            "--gap of {} mm would make {} overlap itself; it must be larger than minus the image's shortest side",
+            args.gap,
+            info.path.display()
+        );
+    }
 
     let pages = pack::pack(&sizes, area_w, area_h, gap, !args.no_rotate);
 

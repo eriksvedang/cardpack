@@ -145,7 +145,9 @@ impl MaxRects {
 }
 
 /// Packs `sizes` (w, h) into bins of `bin_w × bin_h`, leaving at least `gap`
-/// between neighbouring items. Every item must fit in an empty bin.
+/// between neighbouring items. A negative `gap` lets neighbours overlap by up
+/// to that much; it must be smaller in magnitude than every item's shorter
+/// side. Every item must fit in an empty bin.
 ///
 /// Each bin is filled greedily; several orderings and placement heuristics
 /// are tried and the one covering the most area wins.
@@ -256,6 +258,18 @@ mod tests {
                     assert!(!grown.intersects(&other), "{a:?} overlaps {b:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn negative_gap_overlaps() {
+        // 10 × 10 items overlapping by 5 mm: a 15 × 15 bin holds a 2 × 2 grid.
+        let sizes = vec![(10.0, 10.0); 4];
+        let pages = pack(&sizes, 15.0, 15.0, -5.0, true);
+        assert_eq!(pages.len(), 1);
+        for p in &pages[0] {
+            let r = placed(p, &sizes);
+            assert!(r.right() <= 15.0 + EPS && r.top() <= 15.0 + EPS);
         }
     }
 }
