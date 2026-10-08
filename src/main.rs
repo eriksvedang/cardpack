@@ -126,14 +126,14 @@ fn main() -> Result<()> {
         bail!("no images found in {}", args.input.display());
     }
 
-    let sizes: Vec<(f64, f64)> = infos
+    let info_sizes: Vec<(f64, f64)> = infos
         .iter()
         .map(|info| {
             let (w, h) = print_size(info, &args);
             fit(info, w, h, area_w, area_h, !args.no_rotate)
         })
         .collect();
-    if let Some((info, _)) = infos.iter().zip(&sizes).find(|(_, (w, h))| w.min(*h) + gap <= 0.0) {
+    if let Some((info, _)) = infos.iter().zip(&info_sizes).find(|(_, (w, h))| w.min(*h) + gap <= 0.0) {
         bail!(
             "--gap of {} mm would make {} overlap itself; it must be larger than minus the image's shortest side",
             args.gap,
@@ -141,11 +141,21 @@ fn main() -> Result<()> {
         );
     }
 
+    // One item per copy; `items[i]` is the index into `infos` of item `i`.
+    let items: Vec<usize> = infos
+        .iter()
+        .enumerate()
+        .flat_map(|(i, info)| std::iter::repeat(i).take(copies(&info.path)))
+        .collect();
+    let sizes: Vec<(f64, f64)> = items.iter().map(|&i| info_sizes[i]).collect();
+
     let pages = pack::pack(&sizes, area_w, area_h, gap, !args.no_rotate);
 
     let mut doc = Document::with_version("1.5");
     let pages_id = doc.new_object_id();
     let mut kids = Vec::new();
+    // Copies of an image share a single embedded XObject.
+    let mut image_ids = vec![None; infos.len()];
 
     for (n, page) in pages.iter().enumerate() {
         // Centre the packed block within the printable area.
@@ -159,9 +169,17 @@ fn main() -> Result<()> {
         let mut content = String::new();
         let mut xobjects = Dictionary::new();
         for (k, p) in page.iter().enumerate() {
-            let info = &infos[p.index];
-            let image_id = images::embed(&mut doc, info)
-                .with_context(|| format!("embedding {}", info.path.display()))?;
+            let info_index = items[p.index];
+            let image_id = match image_ids[info_index] {
+                Some(id) => id,
+                None => {
+                    let info = &infos[info_index];
+                    let id = images::embed(&mut doc, info)
+                        .with_context(|| format!("embedding {}", info.path.display()))?;
+                    image_ids[info_index] = Some(id);
+                    id
+                }
+            };
             let name = format!("Im{k}");
             xobjects.set(name.as_bytes(), Object::Reference(image_id));
 
@@ -215,7 +233,7 @@ fn main() -> Result<()> {
 
     eprintln!(
         "wrote {} image(s) on {} page(s) to {}",
-        infos.len(),
+        items.len(),
         pages.len(),
         args.output.display()
     );
@@ -238,6 +256,18 @@ fn collect_images(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Result
         }
     }
     Ok(())
+}
+
+/// Number of copies asked for by a `_x<N>` suffix on the file name, e.g. `card_x3.png`.
+fn copies(path: &Path) -> usize {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit_once("_x"))
+        .map(|(_, n)| n)
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|n| n.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1)
 }
 
 /// Physical size of an image in points, from --width/--height or --dpi.
