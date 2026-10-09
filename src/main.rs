@@ -82,6 +82,13 @@ struct Args {
     /// Also pick up images in subdirectories
     #[arg(short, long)]
     recursive: bool,
+
+    /// File listing which images to include and how many copies of each, one
+    /// per line as `<count> <name>` (e.g. `4 FiveOfClubs`). The name is the
+    /// file name, with or without its extension; a missing count means 1.
+    /// Images not listed are left out
+    #[arg(short, long)]
+    counts: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -115,10 +122,46 @@ fn main() -> Result<()> {
         .with_context(|| format!("reading {}", args.input.display()))?;
     paths.sort();
 
+    // Pair each image with the number of copies wanted.
+    let paths: Vec<(PathBuf, usize)> = match &args.counts {
+        Some(file) => {
+            let counts = read_counts(file).with_context(|| format!("reading {}", file.display()))?;
+            let mut used = vec![false; counts.len()];
+            let selected = paths
+                .into_iter()
+                .filter_map(|path| {
+                    let i = counts.iter().position(|(name, _)| matches_name(&path, name))?;
+                    used[i] = true;
+                    Some((path, counts[i].1))
+                })
+                .collect();
+            for ((name, _), used) in counts.iter().zip(used) {
+                if !used {
+                    eprintln!("warning: no image named {name} in {}", args.input.display());
+                }
+            }
+            selected
+        }
+        None => paths
+            .into_iter()
+            .map(|path| {
+                let n = copies(&path);
+                (path, n)
+            })
+            .collect(),
+    };
+
     let mut infos = Vec::new();
-    for path in paths {
+    let mut counts = Vec::new();
+    for (path, count) in paths {
+        if count == 0 {
+            continue;
+        }
         match images::probe(&path) {
-            Ok(info) => infos.push(info),
+            Ok(info) => {
+                infos.push(info);
+                counts.push(count);
+            }
             Err(e) => eprintln!("skipping {}: {e}", path.display()),
         }
     }
@@ -142,10 +185,10 @@ fn main() -> Result<()> {
     }
 
     // One item per copy; `items[i]` is the index into `infos` of item `i`.
-    let items: Vec<usize> = infos
+    let items: Vec<usize> = counts
         .iter()
         .enumerate()
-        .flat_map(|(i, info)| std::iter::repeat(i).take(copies(&info.path)))
+        .flat_map(|(i, &n)| std::iter::repeat(i).take(n))
         .collect();
     let sizes: Vec<(f64, f64)> = items.iter().map(|&i| info_sizes[i]).collect();
 
@@ -268,6 +311,36 @@ fn copies(path: &Path) -> usize {
         .and_then(|n| n.parse().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(1)
+}
+
+/// Parses a counts file: one `<count> <name>` or `<name>` per line. Blank
+/// lines and lines starting with `#` are ignored.
+fn read_counts(file: &Path) -> Result<Vec<(String, usize)>> {
+    let text = std::fs::read_to_string(file)?;
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (count, name) = match line.split_once(char::is_whitespace) {
+            Some((count, name)) if count.bytes().all(|b| b.is_ascii_digit()) => (
+                count.parse().with_context(|| format!("line {}: bad count", n + 1))?,
+                name.trim(),
+            ),
+            _ => (1, line),
+        };
+        if counts.iter().any(|(other, _)| other == name) {
+            bail!("line {}: {name} is listed more than once", n + 1);
+        }
+        counts.push((name.to_owned(), count));
+    }
+    Ok(counts)
+}
+
+/// Whether `name` from a counts file refers to `path`, by file name with or without extension.
+fn matches_name(path: &Path, name: &str) -> bool {
+    path.file_stem().is_some_and(|s| s == name) || path.file_name().is_some_and(|s| s == name)
 }
 
 /// Physical size of an image in points, from --width/--height or --dpi.
